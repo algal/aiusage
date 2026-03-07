@@ -34,30 +34,24 @@ type claudeCredWrapper struct {
 }
 
 func loadClaudeCredentials() (*claudeCredentials, error) {
+	// On macOS, Keychain is authoritative (Claude Code keeps it updated)
+	if runtime.GOOS == "darwin" {
+		if cred, err := loadClaudeCredentialsFromKeychain(); err == nil {
+			return cred, nil
+		}
+	}
+
+	// Fall back to credentials file
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return nil, fmt.Errorf("home dir: %w", err)
 	}
 	path := filepath.Join(home, claudeCredFile)
 	data, err := os.ReadFile(path)
-	if err == nil {
-		cred, parseErr := parseClaudeCredentials(data, path)
-		if parseErr == nil {
-			return cred, nil
-		}
-	}
-
-	// Fallback: macOS Keychain
-	if runtime.GOOS == "darwin" {
-		if cred, keychainErr := loadClaudeCredentialsFromKeychain(); keychainErr == nil {
-			return cred, nil
-		}
-	}
-
 	if err != nil {
 		return nil, fmt.Errorf("read %s: %w", path, err)
 	}
-	return nil, fmt.Errorf("no valid credentials in %s", path)
+	return parseClaudeCredentials(data, path)
 }
 
 func parseClaudeCredentials(data []byte, source string) (*claudeCredentials, error) {
@@ -135,10 +129,10 @@ func FetchClaudeStatus(client *http.Client, force bool) (*Status, error) {
 		return nil, err
 	}
 
-	// Refresh if expired
+	// If expired, try direct refresh; if that fails, tell user to run claude
 	if cred.ExpiresAt > 0 && time.Now().UnixMilli() >= cred.ExpiresAt {
 		if refreshErr := refreshClaudeToken(cred); refreshErr != nil {
-			return nil, fmt.Errorf("token expired and refresh failed: %w", refreshErr)
+			return nil, fmt.Errorf("claude token expired; run 'claude' to refresh, then retry")
 		}
 	}
 
@@ -157,7 +151,7 @@ func FetchClaudeStatus(client *http.Client, force bool) (*Status, error) {
 	defer func() { _ = resp.Body.Close() }()
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 
-	// If unauthorized, try refresh once
+	// If unauthorized, try direct refresh once
 	if resp.StatusCode == 401 && cred.RefreshToken != "" {
 		if refreshErr := refreshClaudeToken(cred); refreshErr == nil {
 			s, err := fetchClaudeUsage(client, cred)
@@ -166,6 +160,9 @@ func FetchClaudeStatus(client *http.Client, force bool) (*Status, error) {
 			}
 			return s, err
 		}
+	}
+	if resp.StatusCode == 401 {
+		return nil, fmt.Errorf("claude token unauthorized; run 'claude' to refresh, then retry")
 	}
 
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
