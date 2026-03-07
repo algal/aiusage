@@ -119,7 +119,13 @@ func refreshCodexToken(auth *codexAuthData) error {
 	return nil
 }
 
-func FetchCodexStatus(client *http.Client) (*Status, error) {
+func FetchCodexStatus(client *http.Client, force bool) (*Status, error) {
+	if !force {
+		if cached, ok := loadCache("openai"); ok {
+			return cached, nil
+		}
+	}
+
 	auth, err := loadCodexCredentials()
 	if err != nil {
 		return nil, err
@@ -135,7 +141,11 @@ func FetchCodexStatus(client *http.Client) (*Status, error) {
 	if err != nil {
 		return nil, err
 	}
-	return parseCodexUsageResponse(body)
+	s, parseErr := parseCodexUsageResponse(body)
+	if parseErr == nil {
+		saveCache("openai", s)
+	}
+	return s, parseErr
 }
 
 func doCodexUsageRequest(client *http.Client, auth *codexAuthData) ([]byte, error) {

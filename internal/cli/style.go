@@ -30,8 +30,12 @@ func NewStyle(mode string, out *os.File) Style {
 	}
 }
 
+func (s Style) Section(text string) string {
+	return s.paintRGB(text, 96, 165, 250, true)
+}
+
 func (s Style) Header(text string) string {
-	return s.paint(text, "95", true)
+	return s.paintRGB(text, 167, 139, 250, true)
 }
 
 func (s Style) Label(text string) string {
@@ -44,6 +48,17 @@ func (s Style) Muted(text string) string {
 
 func (s Style) Warn(text string) string {
 	return s.paint(text, "33", true)
+}
+
+func (s Style) paintRGB(text string, r, g, b int, bold bool) string {
+	if !s.enabled {
+		return text
+	}
+	prefix := fmt.Sprintf("\033[38;2;%d;%d;%d", r, g, b)
+	if bold {
+		prefix += ";1"
+	}
+	return prefix + "m" + text + "\033[0m"
 }
 
 func (s Style) paint(text, colorCode string, bold bool) string {

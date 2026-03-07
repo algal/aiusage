@@ -62,9 +62,6 @@ type outputPayload struct {
 func main() {
 	if len(os.Args) > 1 {
 		switch strings.ToLower(strings.TrimSpace(os.Args[1])) {
-		case "plan", "roadmap", "features":
-			printPlan(os.Stdout)
-			return
 		case "help", "--help", "-h":
 			opts := defaultOptions()
 			printUsage(os.Stdout, opts.colorMode)
@@ -588,9 +585,9 @@ func normalizeGroupBy(raw string) (string, error) {
 
 func printReportText(opts options, rows []report.AggregatedRow, warnings []string, start, end time.Time) {
 	st := cli.NewStyle(opts.colorMode, os.Stdout)
-	fmt.Println(st.Header("API Key Usage"))
+	fmt.Println(st.Section("API Key Usage"))
 	fmt.Println(st.Muted("  source: provider admin APIs (pay-per-token billing)"))
-	fmt.Println()
+	fmt.Println(st.Header("Window"))
 	fmt.Printf("  provider: %s\n", opts.provider)
 	fmt.Printf("  group_by: %s\n", opts.groupBy)
 	fmt.Printf("  start:    %s\n", start.Format("2006-01-02"))
@@ -733,8 +730,7 @@ func printUsage(out *os.File, colorMode string) {
 
 	fmt.Fprintf(out, "%s: %s [report flags]\n", st.Label("Usage"), exe)
 	fmt.Fprintf(out, "       %s report [flags]\n", exe)
-	fmt.Fprintf(out, "       %s sub [--json] [--color=auto]\n", exe)
-	fmt.Fprintf(out, "       %s plan\n", exe)
+	fmt.Fprintf(out, "       %s sub [--provider=all] [--force] [--json] [--color=auto]\n", exe)
 	fmt.Fprintf(out, "%s: %s (%s)\n\n", st.Label("Build"), Version, Build)
 
 	fmt.Fprintln(out, "Token and dollar usage reporter for OpenAI + Anthropic, split by API key and date.")
@@ -771,40 +767,18 @@ func printUsage(out *os.File, colorMode string) {
 	fmt.Fprintf(out, "  %s --provider openai --openai-cost-csv /tmp/openai_cost_truth.csv --start 2026-03-01 --end 2026-03-05\n", exe)
 	fmt.Fprintf(out, "  %s --provider all --group-by model --start 2026-03-01 --end 2026-03-05\n", exe)
 	fmt.Fprintf(out, "  %s report --provider openai --json\n", exe)
-	fmt.Fprintf(out, "  %s plan\n", exe)
-}
-
-func printPlan(out io.Writer) {
-	fmt.Fprintln(out, "aiusage Planned Features")
-	fmt.Fprintln(out)
-	fmt.Fprintln(out, "1. Billing precision")
-	fmt.Fprintln(out, "- Add additional allocation strategies beyond token-share (model-share, fixed, weighted).")
-	fmt.Fprintln(out, "- Add optional invoice reconciliation and discrepancy reports.")
-	fmt.Fprintln(out)
-	fmt.Fprintln(out, "2. Identity and attribution")
-	fmt.Fprintln(out, "- API key alias mapping from local config and provider metadata lookups.")
-	fmt.Fprintln(out, "- Optional grouping by project/workspace/model in addition to key+date.")
-	fmt.Fprintln(out)
-	fmt.Fprintln(out, "3. Operational usability")
-	fmt.Fprintln(out, "- Exporters: CSV and Parquet.")
-	fmt.Fprintln(out, "- Threshold alerts (daily spend caps, key anomaly detection).")
-	fmt.Fprintln(out, "- Cron mode with checkpointed incremental sync.")
-	fmt.Fprintln(out)
-	fmt.Fprintln(out, "4. Reliability")
-	fmt.Fprintln(out, "- Retries and adaptive backoff for rate-limit and transient failures.")
-	fmt.Fprintln(out, "- Golden tests using captured fixture responses for API shape drift.")
-	fmt.Fprintln(out)
-	fmt.Fprintln(out, "5. Security")
-	fmt.Fprintln(out, "- Native support for 1Password/pass/keyring secret resolution.")
-	fmt.Fprintln(out, "- Optional redaction mode to hash API key IDs in output.")
 }
 
 func runSub(args []string) error {
 	fs := flag.NewFlagSet("sub", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
+	var provider string
 	var jsonOutput bool
 	var colorMode string
 	var timeout time.Duration
+	var force bool
+	fs.StringVar(&provider, "provider", "all", "Provider: all|openai|anthropic")
+	fs.BoolVar(&force, "force", false, "Bypass cache and fetch fresh data")
 	fs.BoolVar(&jsonOutput, "json", false, "Output JSON")
 	fs.StringVar(&colorMode, "color", "auto", "Color mode: auto|always|never")
 	fs.DurationVar(&timeout, "timeout", 15*time.Second, "HTTP timeout")
@@ -812,20 +786,31 @@ func runSub(args []string) error {
 		return err
 	}
 
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	switch provider {
+	case "all", "openai", "anthropic":
+	default:
+		return fmt.Errorf("invalid --provider=%q (expected all|openai|anthropic)", provider)
+	}
+
 	client := &http.Client{Timeout: timeout}
 	statuses := make([]subscription.Status, 0, 2)
 	warnings := make([]string, 0, 2)
 
-	if s, err := subscription.FetchClaudeStatus(client); err != nil {
-		warnings = append(warnings, fmt.Sprintf("anthropic: %v", err))
-	} else {
-		statuses = append(statuses, *s)
+	if provider == "all" || provider == "anthropic" {
+		if s, err := subscription.FetchClaudeStatus(client, force); err != nil {
+			warnings = append(warnings, fmt.Sprintf("anthropic: %v", err))
+		} else {
+			statuses = append(statuses, *s)
+		}
 	}
 
-	if s, err := subscription.FetchCodexStatus(client); err != nil {
-		warnings = append(warnings, fmt.Sprintf("openai: %v", err))
-	} else {
-		statuses = append(statuses, *s)
+	if provider == "all" || provider == "openai" {
+		if s, err := subscription.FetchCodexStatus(client, force); err != nil {
+			warnings = append(warnings, fmt.Sprintf("openai: %v", err))
+		} else {
+			statuses = append(statuses, *s)
+		}
 	}
 
 	if len(statuses) == 0 {
@@ -856,9 +841,8 @@ func runSub(args []string) error {
 
 func printSubText(statuses []subscription.Status, warnings []string, colorMode string) {
 	st := cli.NewStyle(colorMode, os.Stdout)
-	fmt.Println(st.Header("Subscription Quota"))
+	fmt.Println(st.Section("Subscription Quota"))
 	fmt.Println(st.Muted("  source: CLI OAuth credentials (live quota from provider)"))
-	fmt.Println()
 
 	rows := make([][]string, 0, 8)
 	for _, s := range statuses {

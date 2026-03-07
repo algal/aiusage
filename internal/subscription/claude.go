@@ -94,7 +94,13 @@ func refreshClaudeToken(cred *claudeCredentials) error {
 	return nil
 }
 
-func FetchClaudeStatus(client *http.Client) (*Status, error) {
+func FetchClaudeStatus(client *http.Client, force bool) (*Status, error) {
+	if !force {
+		if cached, ok := loadCache("anthropic"); ok {
+			return cached, nil
+		}
+	}
+
 	cred, err := loadClaudeCredentials()
 	if err != nil {
 		return nil, err
@@ -125,7 +131,11 @@ func FetchClaudeStatus(client *http.Client) (*Status, error) {
 	// If unauthorized, try refresh once
 	if resp.StatusCode == 401 && cred.RefreshToken != "" {
 		if refreshErr := refreshClaudeToken(cred); refreshErr == nil {
-			return fetchClaudeUsage(client, cred)
+			s, err := fetchClaudeUsage(client, cred)
+			if err == nil {
+				saveCache("anthropic", s)
+			}
+			return s, err
 		}
 	}
 
@@ -133,7 +143,11 @@ func FetchClaudeStatus(client *http.Client) (*Status, error) {
 		return nil, fmt.Errorf("usage request failed (%s): %s", resp.Status, truncate(body, 200))
 	}
 
-	return parseClaudeUsageResponse(body)
+	s, err := parseClaudeUsageResponse(body)
+	if err == nil {
+		saveCache("anthropic", s)
+	}
+	return s, err
 }
 
 func fetchClaudeUsage(client *http.Client, cred *claudeCredentials) (*Status, error) {
