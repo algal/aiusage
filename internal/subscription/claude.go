@@ -8,7 +8,9 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 )
@@ -38,17 +40,44 @@ func loadClaudeCredentials() (*claudeCredentials, error) {
 	}
 	path := filepath.Join(home, claudeCredFile)
 	data, err := os.ReadFile(path)
+	if err == nil {
+		cred, parseErr := parseClaudeCredentials(data, path)
+		if parseErr == nil {
+			return cred, nil
+		}
+	}
+
+	// Fallback: macOS Keychain
+	if runtime.GOOS == "darwin" {
+		if cred, keychainErr := loadClaudeCredentialsFromKeychain(); keychainErr == nil {
+			return cred, nil
+		}
+	}
+
 	if err != nil {
 		return nil, fmt.Errorf("read %s: %w", path, err)
 	}
+	return nil, fmt.Errorf("no valid credentials in %s", path)
+}
+
+func parseClaudeCredentials(data []byte, source string) (*claudeCredentials, error) {
 	var f claudeCredWrapper
 	if err := json.Unmarshal(data, &f); err != nil {
-		return nil, fmt.Errorf("parse %s: %w", path, err)
+		return nil, fmt.Errorf("parse %s: %w", source, err)
 	}
 	if f.ClaudeAiOauth.AccessToken == "" {
-		return nil, fmt.Errorf("no access token in %s", path)
+		return nil, fmt.Errorf("no access token in %s", source)
 	}
 	return &f.ClaudeAiOauth, nil
+}
+
+func loadClaudeCredentialsFromKeychain() (*claudeCredentials, error) {
+	out, err := exec.Command("security", "find-generic-password",
+		"-s", "Claude Code-credentials", "-w").Output()
+	if err != nil {
+		return nil, fmt.Errorf("keychain lookup failed: %w", err)
+	}
+	return parseClaudeCredentials(bytes.TrimSpace(out), "keychain")
 }
 
 func refreshClaudeToken(cred *claudeCredentials) error {

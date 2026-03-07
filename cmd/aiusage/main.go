@@ -66,12 +66,12 @@ func main() {
 			opts := defaultOptions()
 			printUsage(os.Stdout, opts.colorMode)
 			return
-		case "report":
+		case "api":
 			if err := runReport(os.Args[2:]); err != nil {
 				fatal(err)
 			}
 			return
-		case "sub", "subscription":
+		case "subs":
 			if err := runSub(os.Args[2:]); err != nil {
 				fatal(err)
 			}
@@ -728,25 +728,35 @@ func printUsage(out *os.File, colorMode string) {
 	st := cli.NewStyle(colorMode, out)
 	exe := filepath.Base(os.Args[0])
 
-	fmt.Fprintf(out, "%s: %s [report flags]\n", st.Label("Usage"), exe)
-	fmt.Fprintf(out, "       %s report [flags]\n", exe)
-	fmt.Fprintf(out, "       %s sub [--provider=all] [--force] [--json] [--color=auto]\n", exe)
-	fmt.Fprintf(out, "%s: %s (%s)\n\n", st.Label("Build"), Version, Build)
-
-	fmt.Fprintln(out, "Token and dollar usage reporter for OpenAI + Anthropic, split by API key and date.")
-	fmt.Fprintln(out, "Also tracks subscription quota usage via 'sub' command.")
-	fmt.Fprintln(out, "Dollar values come from API-provided cost fields when present, otherwise model-rate estimates.")
+	fmt.Fprintf(out, "%s: %s                    Show subscription quota + API key usage\n", st.Label("Usage"), exe)
+	fmt.Fprintf(out, "       %s api [flags]        API key usage only\n", exe)
+	fmt.Fprintf(out, "       %s subs [flags]       Subscription quota only\n", exe)
+	fmt.Fprintln(out)
+	fmt.Fprintln(out, "API key usage and subscription quota for OpenAI and Anthropic.")
 	fmt.Fprintln(out)
 
-	fmt.Fprintln(out, st.Header("Flags"))
-	fmt.Fprintln(out, "  -h, --help                        Show help.")
-	fmt.Fprintln(out, "      --version                     Print version and exit.")
-	fmt.Fprintln(out, "      --provider=all                all|openai|anthropic.")
-	fmt.Fprintln(out, "      --group-by=key,date           key,date|model.")
-	fmt.Fprintln(out, "      --start=YYYY-MM-DD            Start date.")
-	fmt.Fprintln(out, "      --end=YYYY-MM-DD              End date (inclusive).")
+	fmt.Fprintln(out, st.Header("Flags (api)"))
+	fmt.Fprintln(out, "  -h, --help                 Show help.")
+	fmt.Fprintln(out, "      --version              Print version and exit.")
+	fmt.Fprintln(out, "      --provider=all         all|openai|anthropic.")
+	fmt.Fprintln(out, "      --group-by=key,date    key,date|model.")
+	fmt.Fprintln(out, "      --start=YYYY-MM-DD     Start date (default: 7 days ago).")
+	fmt.Fprintln(out, "      --end=YYYY-MM-DD       End date inclusive (default: today).")
+	fmt.Fprintln(out, "      --pricing-file=PATH    JSON pricing overrides.")
+	fmt.Fprintln(out, "      --json                 Output JSON.")
+	fmt.Fprintln(out, "      --color=auto           auto|always|never.")
+	fmt.Fprintln(out)
+
+	fmt.Fprintln(out, st.Header("Flags (subs)"))
+	fmt.Fprintln(out, "      --provider=all         all|openai|anthropic.")
+	fmt.Fprintln(out, "      --force                Bypass 5-minute cache.")
+	fmt.Fprintln(out, "      --json                 Output JSON.")
+	fmt.Fprintln(out, "      --color=auto           auto|always|never.")
+	fmt.Fprintln(out)
+
+	fmt.Fprintln(out, st.Header("Advanced (api)"))
 	fmt.Fprintln(out, "      --timeout=30s                 HTTP timeout.")
-	fmt.Fprintln(out, "      --limit=31                    Per-page bucket limit for provider APIs.")
+	fmt.Fprintln(out, "      --limit=31                    Per-page bucket limit.")
 	fmt.Fprintln(out, "      --openai-admin-key-env=OPENAI_ADMIN_KEY")
 	fmt.Fprintln(out, "      --anthropic-admin-key-env=ANTHROPIC_ADMIN_KEY")
 	fmt.Fprintln(out, "      --openai-base-url=https://api.openai.com")
@@ -755,22 +765,21 @@ func printUsage(out *os.File, colorMode string) {
 	fmt.Fprintln(out, "      --anthropic-usage-path=/v1/organizations/usage_report/messages")
 	fmt.Fprintln(out, "      --openai-cost-path=/v1/organization/costs")
 	fmt.Fprintln(out, "      --anthropic-cost-path=/v1/organizations/cost_report")
-	fmt.Fprintln(out, "      --openai-cost-csv=PATH        Optional daily cost truth CSV override.")
-	fmt.Fprintln(out, "      --anthropic-cost-csv=PATH     Optional daily cost truth CSV override.")
-	fmt.Fprintln(out, "      --pricing-file=PATH           Optional JSON pricing overrides.")
-	fmt.Fprintln(out, "      --json                        Output machine-readable JSON.")
-	fmt.Fprintln(out, "      --color=auto                  auto|always|never.")
+	fmt.Fprintln(out, "      --openai-cost-csv=PATH        Daily cost truth CSV override.")
+	fmt.Fprintln(out, "      --anthropic-cost-csv=PATH     Daily cost truth CSV override.")
 	fmt.Fprintln(out)
 
 	fmt.Fprintln(out, st.Header("Examples"))
-	fmt.Fprintf(out, "  %s --provider all --start 2026-03-01 --end 2026-03-05\n", exe)
-	fmt.Fprintf(out, "  %s --provider openai --openai-cost-csv /tmp/openai_cost_truth.csv --start 2026-03-01 --end 2026-03-05\n", exe)
-	fmt.Fprintf(out, "  %s --provider all --group-by model --start 2026-03-01 --end 2026-03-05\n", exe)
-	fmt.Fprintf(out, "  %s report --provider openai --json\n", exe)
+	fmt.Fprintf(out, "  %s\n", exe)
+	fmt.Fprintf(out, "  %s api --provider openai --start 2026-03-01 --end 2026-03-05\n", exe)
+	fmt.Fprintf(out, "  %s api --group-by model\n", exe)
+	fmt.Fprintf(out, "  %s api --provider openai --json\n", exe)
+	fmt.Fprintf(out, "  %s subs\n", exe)
+	fmt.Fprintf(out, "  %s subs --provider anthropic --force\n", exe)
 }
 
 func runSub(args []string) error {
-	fs := flag.NewFlagSet("sub", flag.ContinueOnError)
+	fs := flag.NewFlagSet("subs", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	var provider string
 	var jsonOutput bool
