@@ -5,6 +5,7 @@ import (
 	"aiusage/internal/pricing"
 	"aiusage/internal/providers"
 	"aiusage/internal/report"
+	"aiusage/internal/subscription"
 	"context"
 	"encoding/csv"
 	"encoding/json"
@@ -12,6 +13,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"sort"
@@ -72,11 +74,28 @@ func main() {
 				fatal(err)
 			}
 			return
+		case "sub", "subscription":
+			if err := runSub(os.Args[2:]); err != nil {
+				fatal(err)
+			}
+			return
 		}
 	}
 
-	if err := runReport(os.Args[1:]); err != nil {
-		fatal(err)
+	runAll()
+}
+
+func runAll() {
+	// Subscription usage (from CLI OAuth credentials)
+	subErr := runSub(nil)
+
+	fmt.Println()
+
+	// API key usage (from provider admin APIs)
+	reportErr := runReport(os.Args[1:])
+
+	if subErr != nil && reportErr != nil {
+		fatal(fmt.Errorf("sub: %v; report: %v", subErr, reportErr))
 	}
 }
 
@@ -569,10 +588,9 @@ func normalizeGroupBy(raw string) (string, error) {
 
 func printReportText(opts options, rows []report.AggregatedRow, warnings []string, start, end time.Time) {
 	st := cli.NewStyle(opts.colorMode, os.Stdout)
-	fmt.Printf("%s: aiusage report [flags]\n", st.Label("Usage"))
-	fmt.Printf("%s: %s (%s)\n\n", st.Label("Build"), Version, Build)
-
-	fmt.Println(st.Header("Window"))
+	fmt.Println(st.Header("API Key Usage"))
+	fmt.Println(st.Muted("  source: provider admin APIs (pay-per-token billing)"))
+	fmt.Println()
 	fmt.Printf("  provider: %s\n", opts.provider)
 	fmt.Printf("  group_by: %s\n", opts.groupBy)
 	fmt.Printf("  start:    %s\n", start.Format("2006-01-02"))
@@ -715,10 +733,12 @@ func printUsage(out *os.File, colorMode string) {
 
 	fmt.Fprintf(out, "%s: %s [report flags]\n", st.Label("Usage"), exe)
 	fmt.Fprintf(out, "       %s report [flags]\n", exe)
+	fmt.Fprintf(out, "       %s sub [--json] [--color=auto]\n", exe)
 	fmt.Fprintf(out, "       %s plan\n", exe)
 	fmt.Fprintf(out, "%s: %s (%s)\n\n", st.Label("Build"), Version, Build)
 
 	fmt.Fprintln(out, "Token and dollar usage reporter for OpenAI + Anthropic, split by API key and date.")
+	fmt.Fprintln(out, "Also tracks subscription quota usage via 'sub' command.")
 	fmt.Fprintln(out, "Dollar values come from API-provided cost fields when present, otherwise model-rate estimates.")
 	fmt.Fprintln(out)
 
@@ -777,6 +797,137 @@ func printPlan(out io.Writer) {
 	fmt.Fprintln(out, "5. Security")
 	fmt.Fprintln(out, "- Native support for 1Password/pass/keyring secret resolution.")
 	fmt.Fprintln(out, "- Optional redaction mode to hash API key IDs in output.")
+}
+
+func runSub(args []string) error {
+	fs := flag.NewFlagSet("sub", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	var jsonOutput bool
+	var colorMode string
+	var timeout time.Duration
+	fs.BoolVar(&jsonOutput, "json", false, "Output JSON")
+	fs.StringVar(&colorMode, "color", "auto", "Color mode: auto|always|never")
+	fs.DurationVar(&timeout, "timeout", 15*time.Second, "HTTP timeout")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	client := &http.Client{Timeout: timeout}
+	statuses := make([]subscription.Status, 0, 2)
+	warnings := make([]string, 0, 2)
+
+	if s, err := subscription.FetchClaudeStatus(client); err != nil {
+		warnings = append(warnings, fmt.Sprintf("anthropic: %v", err))
+	} else {
+		statuses = append(statuses, *s)
+	}
+
+	if s, err := subscription.FetchCodexStatus(client); err != nil {
+		warnings = append(warnings, fmt.Sprintf("openai: %v", err))
+	} else {
+		statuses = append(statuses, *s)
+	}
+
+	if len(statuses) == 0 {
+		if len(warnings) > 0 {
+			return fmt.Errorf("no subscription data: %s", strings.Join(warnings, "; "))
+		}
+		return fmt.Errorf("no subscription credentials found")
+	}
+
+	if jsonOutput {
+		payload := struct {
+			GeneratedAt string                `json:"generated_at"`
+			Statuses    []subscription.Status `json:"statuses"`
+			Warnings    []string              `json:"warnings,omitempty"`
+		}{
+			GeneratedAt: time.Now().UTC().Format(time.RFC3339),
+			Statuses:    statuses,
+			Warnings:    warnings,
+		}
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		return enc.Encode(payload)
+	}
+
+	printSubText(statuses, warnings, colorMode)
+	return nil
+}
+
+func printSubText(statuses []subscription.Status, warnings []string, colorMode string) {
+	st := cli.NewStyle(colorMode, os.Stdout)
+	fmt.Println(st.Header("Subscription Quota"))
+	fmt.Println(st.Muted("  source: CLI OAuth credentials (live quota from provider)"))
+	fmt.Println()
+
+	rows := make([][]string, 0, 8)
+	for _, s := range statuses {
+		for _, w := range s.Windows {
+			rows = append(rows, []string{
+				s.Provider,
+				planOrDash(s.Plan),
+				w.Name,
+				fmt.Sprintf("%.0f%%", w.UsedPercent),
+				formatResetsIn(w.ResetsAt),
+			})
+		}
+		if s.ExtraUsage != nil && s.ExtraUsage.Enabled {
+			rows = append(rows, []string{
+				s.Provider,
+				planOrDash(s.Plan),
+				"extra",
+				fmt.Sprintf("$%.2f/$%.2f", s.ExtraUsage.UsedUSD, s.ExtraUsage.LimitUSD),
+				"monthly",
+			})
+		}
+		if s.Credits != nil && s.Credits.HasCredits {
+			rows = append(rows, []string{
+				s.Provider,
+				planOrDash(s.Plan),
+				"credits",
+				fmt.Sprintf("$%.2f", s.Credits.Balance),
+				"balance",
+			})
+		}
+	}
+
+	fmt.Println(cli.RenderTable(
+		[]string{"provider", "plan", "window", "used", "resets_in"},
+		rows,
+	))
+
+	if len(warnings) > 0 {
+		fmt.Println()
+		fmt.Println(st.Warn("Warnings"))
+		for _, w := range warnings {
+			fmt.Printf("  - %s\n", w)
+		}
+	}
+}
+
+func planOrDash(s string) string {
+	if s == "" {
+		return "-"
+	}
+	return s
+}
+
+func formatResetsIn(t time.Time) string {
+	if t.IsZero() {
+		return "-"
+	}
+	d := time.Until(t)
+	if d <= 0 {
+		return "now"
+	}
+	hours := int(d.Hours())
+	mins := int(d.Minutes()) % 60
+	if hours >= 24 {
+		days := hours / 24
+		hours = hours % 24
+		return fmt.Sprintf("%dd %dh", days, hours)
+	}
+	return fmt.Sprintf("%dh %dm", hours, mins)
 }
 
 func fatal(err error) {
