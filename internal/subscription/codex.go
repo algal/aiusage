@@ -2,6 +2,7 @@ package subscription
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -9,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -143,9 +145,36 @@ func FetchCodexStatus(client *http.Client, force bool) (*Status, error) {
 	}
 	s, parseErr := parseCodexUsageResponse(body)
 	if parseErr == nil {
+		s.Account = emailFromJWT(auth.Tokens.AccessToken)
 		saveCache("openai", s)
 	}
 	return s, parseErr
+}
+
+// emailFromJWT extracts email from the OpenAI JWT access token's
+// embedded profile claim. Returns "" if not available.
+func emailFromJWT(token string) string {
+	parts := strings.SplitN(token, ".", 3)
+	if len(parts) < 2 {
+		return ""
+	}
+	payload := parts[1]
+	if m := len(payload) % 4; m != 0 {
+		payload += strings.Repeat("=", 4-m)
+	}
+	decoded, err := base64.URLEncoding.DecodeString(payload)
+	if err != nil {
+		return ""
+	}
+	var claims struct {
+		Profile *struct {
+			Email string `json:"email"`
+		} `json:"https://api.openai.com/profile"`
+	}
+	if json.Unmarshal(decoded, &claims) != nil || claims.Profile == nil {
+		return ""
+	}
+	return claims.Profile.Email
 }
 
 func doCodexUsageRequest(client *http.Client, auth *codexAuthData) ([]byte, error) {

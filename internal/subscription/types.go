@@ -23,6 +23,7 @@ type Credits struct {
 
 type Status struct {
 	Provider   string      `json:"provider"`
+	Account    string      `json:"account,omitempty"`
 	Plan       string      `json:"plan,omitempty"`
 	Windows    []Window    `json:"windows"`
 	ExtraUsage *ExtraUsage `json:"extra_usage,omitempty"`

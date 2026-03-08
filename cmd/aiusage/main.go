@@ -893,9 +893,11 @@ func printSubText(statuses []subscription.Status, warnings []string, colorMode s
 
 	rows := make([][]string, 0, 8)
 	for _, s := range statuses {
+		acct := accountOrDash(s.Account)
 		for _, w := range s.Windows {
 			rows = append(rows, []string{
 				s.Provider,
+				acct,
 				planOrDash(s.Plan),
 				w.Name,
 				fmt.Sprintf("%.0f%%", w.UsedPercent),
@@ -905,6 +907,7 @@ func printSubText(statuses []subscription.Status, warnings []string, colorMode s
 		if s.ExtraUsage != nil && s.ExtraUsage.Enabled {
 			rows = append(rows, []string{
 				s.Provider,
+				acct,
 				planOrDash(s.Plan),
 				"extra",
 				fmt.Sprintf("$%.2f/$%.2f", s.ExtraUsage.UsedUSD, s.ExtraUsage.LimitUSD),
@@ -914,6 +917,7 @@ func printSubText(statuses []subscription.Status, warnings []string, colorMode s
 		if s.Credits != nil && s.Credits.HasCredits {
 			rows = append(rows, []string{
 				s.Provider,
+				acct,
 				planOrDash(s.Plan),
 				"credits",
 				fmt.Sprintf("$%.2f", s.Credits.Balance),
@@ -923,7 +927,7 @@ func printSubText(statuses []subscription.Status, warnings []string, colorMode s
 	}
 
 	fmt.Println(cli.RenderTable(
-		[]string{"provider", "plan", "window", "used", "resets_in"},
+		[]string{"provider", "account", "plan", "window", "used", "resets_in"},
 		rows,
 	))
 
@@ -934,6 +938,13 @@ func printSubText(statuses []subscription.Status, warnings []string, colorMode s
 			fmt.Printf("  - %s\n", w)
 		}
 	}
+}
+
+func accountOrDash(s string) string {
+	if s == "" {
+		return "-"
+	}
+	return s
 }
 
 func planOrDash(s string) string {
