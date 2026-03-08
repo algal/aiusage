@@ -5,24 +5,73 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
+	"time"
 )
 
-type ModelRate struct {
-	InputPerMTok      float64 `json:"input_per_mtok"`
-	OutputPerMTok     float64 `json:"output_per_mtok"`
-	CacheReadPerMTok  float64 `json:"cache_read_per_mtok"`
-	CacheWritePerMTok float64 `json:"cache_write_per_mtok"`
+const PricingUpdated = "2026-03-07"
 
-	InputTextPerMTok      float64 `json:"input_text_per_mtok"`
-	OutputTextPerMTok     float64 `json:"output_text_per_mtok"`
-	InputAudioPerMTok     float64 `json:"input_audio_per_mtok"`
-	OutputAudioPerMTok    float64 `json:"output_audio_per_mtok"`
-	InputImagePerMTok     float64 `json:"input_image_per_mtok"`
-	OutputImagePerMTok    float64 `json:"output_image_per_mtok"`
-	CacheReadTextPerMTok  float64 `json:"cache_read_text_per_mtok"`
-	CacheReadAudioPerMTok float64 `json:"cache_read_audio_per_mtok"`
-	CacheReadImagePerMTok float64 `json:"cache_read_image_per_mtok"`
+type PricingSource struct {
+	Name string    // "litellm", "fallback", "file"
+	Date time.Time // when this priceset was determined
+}
+
+func (s PricingSource) Label() string {
+	age := time.Since(s.Date)
+	switch s.Name {
+	case "litellm":
+		return fmt.Sprintf("LiteLLM (cached %s ago)", formatAge(age))
+	case "file":
+		return "pricing file override"
+	default:
+		return fmt.Sprintf("built-in fallback (%s)", PricingUpdated)
+	}
+}
+
+func formatAge(d time.Duration) string {
+	if d < time.Minute {
+		return "<1m"
+	}
+	hours := int(d.Hours())
+	mins := int(d.Minutes()) % 60
+	if hours >= 24 {
+		days := hours / 24
+		hours = hours % 24
+		return fmt.Sprintf("%dd %dh", days, hours)
+	}
+	if hours > 0 {
+		return fmt.Sprintf("%dh %dm", hours, mins)
+	}
+	return fmt.Sprintf("%dm", mins)
+}
+
+func FallbackSource() PricingSource {
+	t, _ := time.Parse("2006-01-02", PricingUpdated)
+	return PricingSource{Name: "fallback", Date: t}
+}
+
+type PricingEntry struct {
+	Provider string
+	Model    string
+	Rate     ModelRate
+}
+
+type ModelRate struct {
+	InputPerMTok      float64 `json:"input_per_mtok,omitempty"`
+	OutputPerMTok     float64 `json:"output_per_mtok,omitempty"`
+	CacheReadPerMTok  float64 `json:"cache_read_per_mtok,omitempty"`
+	CacheWritePerMTok float64 `json:"cache_write_per_mtok,omitempty"`
+
+	InputTextPerMTok      float64 `json:"input_text_per_mtok,omitempty"`
+	OutputTextPerMTok     float64 `json:"output_text_per_mtok,omitempty"`
+	InputAudioPerMTok     float64 `json:"input_audio_per_mtok,omitempty"`
+	OutputAudioPerMTok    float64 `json:"output_audio_per_mtok,omitempty"`
+	InputImagePerMTok     float64 `json:"input_image_per_mtok,omitempty"`
+	OutputImagePerMTok    float64 `json:"output_image_per_mtok,omitempty"`
+	CacheReadTextPerMTok  float64 `json:"cache_read_text_per_mtok,omitempty"`
+	CacheReadAudioPerMTok float64 `json:"cache_read_audio_per_mtok,omitempty"`
+	CacheReadImagePerMTok float64 `json:"cache_read_image_per_mtok,omitempty"`
 }
 
 type Usage struct {
@@ -43,7 +92,7 @@ type Usage struct {
 }
 
 type ProviderPricing struct {
-	Default ModelRate            `json:"default"`
+	Default ModelRate            `json:"default,omitempty"`
 	Models  map[string]ModelRate `json:"models"`
 }
 
@@ -102,6 +151,29 @@ func DefaultBook() Book {
 			},
 		},
 	}}
+}
+
+func (b Book) ListModels() []PricingEntry {
+	var entries []PricingEntry
+	for provider, cfg := range b.Providers {
+		for model, rate := range cfg.Models {
+			if strings.HasSuffix(model, "*") {
+				continue
+			}
+			entries = append(entries, PricingEntry{
+				Provider: provider,
+				Model:    model,
+				Rate:     rate,
+			})
+		}
+	}
+	sort.Slice(entries, func(i, j int) bool {
+		if entries[i].Provider != entries[j].Provider {
+			return entries[i].Provider < entries[j].Provider
+		}
+		return entries[i].Model < entries[j].Model
+	})
+	return entries
 }
 
 func LoadFile(path string) (Book, error) {

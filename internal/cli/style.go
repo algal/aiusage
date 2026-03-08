@@ -43,7 +43,7 @@ func (s Style) Label(text string) string {
 }
 
 func (s Style) Muted(text string) string {
-	return s.paint(text, "90", false)
+	return s.paintRGB(text, 140, 140, 140, false)
 }
 
 func (s Style) Warn(text string) string {

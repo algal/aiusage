@@ -39,12 +39,19 @@ aiusage subs --json
 
 ## Pricing
 
-Dollar costs come from provider cost APIs when available (`cost_src=truth_allocated`). When not available, costs are estimated from built-in model rates (`cost_src=estimated_pricing`).
+Dollar costs come from provider cost APIs when available (`cost_src=truth_allocated`). When not available, costs are estimated from model rates (`cost_src=estimated_pricing`).
 
-Override built-in rates with `--pricing-file`:
+Pricing is resolved in order: built-in fallback → LiteLLM (fetched live, cached 24h) → `--pricing-file` (manual override). The report header shows the active pricing source and its date.
 
 ```bash
-aiusage --pricing-file ./pricing.sample.json
+# Show current pricing table and source
+aiusage prices
+
+# Compare built-in rates against LiteLLM (writes pricing-override.json if mismatched)
+aiusage prices --check
+
+# Manual override
+aiusage api --pricing-file ./pricing-override.json
 ```
 
 ## Build
@@ -58,3 +65,4 @@ go build ./cmd/aiusage
 - API endpoints are configurable via `--openai-usage-path`, `--anthropic-usage-path`, etc.
 - If pricing is missing for a model, cost is zero and a warning is shown.
 - Subscription quota is cached for 5 minutes to avoid rate limits. Use `--force` to bypass.
+- LiteLLM pricing is cached for 24 hours. If LiteLLM is unreachable, built-in fallback rates are used.

@@ -76,6 +76,11 @@ func main() {
 				fatal(err)
 			}
 			return
+		case "prices":
+			if err := runPrices(os.Args[2:]); err != nil {
+				fatal(err)
+			}
+			return
 		}
 	}
 
@@ -119,12 +124,22 @@ func runReport(args []string) error {
 	endExclusive := endDay.AddDate(0, 0, 1)
 
 	book := pricing.DefaultBook()
+	pricingSrc := pricing.FallbackSource()
+
+	// Try LiteLLM pricing overlay (cached 24h)
+	llmClient := &http.Client{Timeout: 15 * time.Second}
+	if llmBook, llmDate, llmErr := pricing.LoadOrFetchLiteLLM(llmClient, book, false); llmErr == nil {
+		book = pricing.Merge(book, llmBook)
+		pricingSrc = pricing.PricingSource{Name: "litellm", Date: llmDate}
+	}
+
 	if strings.TrimSpace(opts.pricingFile) != "" {
 		override, err := pricing.LoadFile(opts.pricingFile)
 		if err != nil {
 			return err
 		}
 		book = pricing.Merge(book, override)
+		pricingSrc = pricing.PricingSource{Name: "file"}
 	}
 
 	ctx := context.Background()
@@ -317,7 +332,7 @@ func runReport(args []string) error {
 		return enc.Encode(payload)
 	}
 
-	printReportText(opts, agg, warnings, startDay, endDay)
+	printReportText(opts, agg, warnings, startDay, endDay, pricingSrc)
 	return nil
 }
 
@@ -583,10 +598,23 @@ func normalizeGroupBy(raw string) (string, error) {
 	}
 }
 
-func printReportText(opts options, rows []report.AggregatedRow, warnings []string, start, end time.Time) {
+func printReportText(opts options, rows []report.AggregatedRow, warnings []string, start, end time.Time, pricingSrc pricing.PricingSource) {
 	st := cli.NewStyle(opts.colorMode, os.Stdout)
+	hasEstimated := false
+	for _, row := range rows {
+		if row.CostEstimated {
+			hasEstimated = true
+			break
+		}
+	}
+
 	fmt.Println(st.Section("API Key Usage"))
+	fmt.Println()
 	fmt.Println(st.Muted("  source: provider admin APIs (pay-per-token billing)"))
+	if hasEstimated {
+		fmt.Println(st.Muted("  estimated pricing: " + pricingSrc.Label()))
+	}
+	fmt.Println()
 	fmt.Println(st.Header("Window"))
 	fmt.Printf("  provider: %s\n", opts.provider)
 	fmt.Printf("  group_by: %s\n", opts.groupBy)
@@ -731,6 +759,7 @@ func printUsage(out *os.File, colorMode string) {
 	fmt.Fprintf(out, "%s: %s                    Show subscription quota + API key usage\n", st.Label("Usage"), exe)
 	fmt.Fprintf(out, "       %s api [flags]        API key usage only\n", exe)
 	fmt.Fprintf(out, "       %s subs [flags]       Subscription quota only\n", exe)
+	fmt.Fprintf(out, "       %s prices [--check]   Show built-in pricing table\n", exe)
 	fmt.Fprintln(out)
 	fmt.Fprintln(out, "API key usage and subscription quota for OpenAI and Anthropic.")
 	fmt.Fprintln(out)
@@ -751,6 +780,11 @@ func printUsage(out *os.File, colorMode string) {
 	fmt.Fprintln(out, "      --provider=all         all|openai|anthropic.")
 	fmt.Fprintln(out, "      --force                Bypass 5-minute cache.")
 	fmt.Fprintln(out, "      --json                 Output JSON.")
+	fmt.Fprintln(out, "      --color=auto           auto|always|never.")
+	fmt.Fprintln(out)
+
+	fmt.Fprintln(out, st.Header("Flags (prices)"))
+	fmt.Fprintln(out, "      --check                Check rates against LiteLLM public pricing.")
 	fmt.Fprintln(out, "      --color=auto           auto|always|never.")
 	fmt.Fprintln(out)
 
@@ -776,6 +810,8 @@ func printUsage(out *os.File, colorMode string) {
 	fmt.Fprintf(out, "  %s api --provider openai --json\n", exe)
 	fmt.Fprintf(out, "  %s subs\n", exe)
 	fmt.Fprintf(out, "  %s subs --provider anthropic --force\n", exe)
+	fmt.Fprintf(out, "  %s prices\n", exe)
+	fmt.Fprintf(out, "  %s prices --check\n", exe)
 }
 
 func runSub(args []string) error {
@@ -851,7 +887,9 @@ func runSub(args []string) error {
 func printSubText(statuses []subscription.Status, warnings []string, colorMode string) {
 	st := cli.NewStyle(colorMode, os.Stdout)
 	fmt.Println(st.Section("Subscription Quota"))
+	fmt.Println()
 	fmt.Println(st.Muted("  source: CLI OAuth credentials (live quota from provider)"))
+	fmt.Println()
 
 	rows := make([][]string, 0, 8)
 	for _, s := range statuses {
@@ -921,6 +959,116 @@ func formatResetsIn(t time.Time) string {
 		return fmt.Sprintf("%dd %dh", days, hours)
 	}
 	return fmt.Sprintf("%dh %dm", hours, mins)
+}
+
+func runPrices(args []string) error {
+	fs := flag.NewFlagSet("prices", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	var check bool
+	var colorMode string
+	fs.BoolVar(&check, "check", false, "Check against LiteLLM public pricing")
+	fs.StringVar(&colorMode, "color", "auto", "Color mode: auto|always|never")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	book := pricing.DefaultBook()
+	pricingSrc := pricing.FallbackSource()
+
+	if !check {
+		// When just listing, try LiteLLM so we show current rates
+		llmClient := &http.Client{Timeout: 15 * time.Second}
+		if llmBook, llmDate, llmErr := pricing.LoadOrFetchLiteLLM(llmClient, book, false); llmErr == nil {
+			book = pricing.Merge(book, llmBook)
+			pricingSrc = pricing.PricingSource{Name: "litellm", Date: llmDate}
+		}
+	}
+
+	entries := book.ListModels()
+
+	st := cli.NewStyle(colorMode, os.Stdout)
+	fmt.Println(st.Section("Model Pricing"))
+	fmt.Println()
+	fmt.Println(st.Muted("  source: " + pricingSrc.Label()))
+	fmt.Println()
+
+	rows := make([][]string, 0, len(entries))
+	for _, e := range entries {
+		input := formatPriceRate(e.Rate.InputPerMTok, e.Rate.InputTextPerMTok)
+		output := formatPriceRate(e.Rate.OutputPerMTok, e.Rate.OutputTextPerMTok)
+		cacheR := formatPriceRate(e.Rate.CacheReadPerMTok, 0)
+		cacheW := formatPriceRate(e.Rate.CacheWritePerMTok, 0)
+		rows = append(rows, []string{e.Provider, e.Model, input, output, cacheR, cacheW})
+	}
+	fmt.Println(cli.RenderTable(
+		[]string{"provider", "model", "input/MTok", "output/MTok", "cache_r/MTok", "cache_w/MTok"},
+		rows,
+	))
+
+	if !check {
+		return nil
+	}
+
+	fmt.Println()
+	client := &http.Client{Timeout: 30 * time.Second}
+	fmt.Println(st.Muted("  Checking against LiteLLM pricing..."))
+	result, err := pricing.CheckAgainstLiteLLM(client, book)
+	if err != nil {
+		return err
+	}
+
+	if len(result.Diffs) == 0 {
+		fmt.Println(st.Muted("  All matched rates are current."))
+	} else {
+		fmt.Println(st.Header("Mismatches"))
+		diffRows := make([][]string, 0, len(result.Diffs))
+		for _, d := range result.Diffs {
+			diffRows = append(diffRows, []string{
+				d.Provider, d.Model, d.Field,
+				fmt.Sprintf("$%.4f", d.BuiltIn),
+				fmt.Sprintf("$%.4f", d.LiteLLM),
+			})
+		}
+		fmt.Println(cli.RenderTable(
+			[]string{"provider", "model", "field", "built_in", "litellm"},
+			diffRows,
+		))
+
+		override := pricing.OverrideBookFromDiffs(result.Diffs)
+		data, jsonErr := json.MarshalIndent(override, "", "  ")
+		if jsonErr == nil {
+			outPath := "pricing-override.json"
+			if writeErr := os.WriteFile(outPath, append(data, '\n'), 0644); writeErr == nil {
+				fmt.Printf("  Wrote %s — use with: aiusage api --pricing-file %s\n", outPath, outPath)
+			}
+		}
+	}
+
+	if len(result.NotFound) > 0 {
+		fmt.Println(st.Muted(fmt.Sprintf("  %d models not found in LiteLLM: %s", len(result.NotFound), strings.Join(result.NotFound, ", "))))
+	}
+
+	return nil
+}
+
+func formatPriceRate(primary, fallback float64) string {
+	v := primary
+	if v == 0 {
+		v = fallback
+	}
+	if v == 0 {
+		return "-"
+	}
+	s := fmt.Sprintf("%.4f", v)
+	parts := strings.SplitN(s, ".", 2)
+	if len(parts) == 2 {
+		dec := strings.TrimRight(parts[1], "0")
+		for len(dec) < 2 {
+			dec += "0"
+		}
+		s = parts[0] + "." + dec
+	}
+	return "$" + s
 }
 
 func fatal(err error) {
