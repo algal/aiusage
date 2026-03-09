@@ -46,9 +46,12 @@ type options struct {
 	anthropicUsagePath   string
 	openAICostPath       string
 	anthropicCostPath    string
-	openAICostCSV        string
-	anthropicCostCSV     string
-	limit                int
+	openAICostCSV          string
+	anthropicCostCSV       string
+	openRouterAdminKeyEnv  string
+	openRouterBaseURL      string
+	openRouterUsagePath    string
+	limit                  int
 }
 
 type outputPayload struct {
@@ -149,8 +152,10 @@ func runReport(args []string) error {
 
 	includeOpenAI := opts.provider == "all" || opts.provider == "openai"
 	includeAnthropic := opts.provider == "all" || opts.provider == "anthropic"
+	includeOpenRouter := opts.provider == "all" || opts.provider == "openrouter"
 	openAIKey := strings.TrimSpace(os.Getenv(opts.openAIAdminKeyEnv))
 	anthropicKey := strings.TrimSpace(os.Getenv(opts.anthropicAdminKeyEnv))
+	openRouterKey := strings.TrimSpace(os.Getenv(opts.openRouterAdminKeyEnv))
 
 	if includeOpenAI {
 		if openAIKey == "" {
@@ -200,6 +205,32 @@ func runReport(args []string) error {
 					return fmt.Errorf("anthropic fetch failed: %w", fetchErr)
 				}
 				warnings = append(warnings, fmt.Sprintf("anthropic fetch failed: %v", fetchErr))
+			} else {
+				records = append(records, rows...)
+			}
+		}
+	}
+
+	if includeOpenRouter {
+		if openRouterKey == "" {
+			err := fmt.Errorf("missing %s for OpenRouter", opts.openRouterAdminKeyEnv)
+			if opts.provider == "openrouter" {
+				return err
+			}
+			warnings = append(warnings, err.Error())
+		} else {
+			rows, fetchErr := providers.FetchOpenRouterUsage(ctx, client, providers.OpenRouterConfig{
+				BaseURL: opts.openRouterBaseURL,
+				Path:    opts.openRouterUsagePath,
+				APIKey:  openRouterKey,
+				Start:   startDay,
+				End:     endExclusive,
+			})
+			if fetchErr != nil {
+				if opts.provider == "openrouter" {
+					return fmt.Errorf("openrouter fetch failed: %w", fetchErr)
+				}
+				warnings = append(warnings, fmt.Sprintf("openrouter fetch failed: %v", fetchErr))
 			} else {
 				records = append(records, rows...)
 			}
@@ -359,6 +390,9 @@ func parseOptions(args []string) (options, error) {
 	fs.StringVar(&opts.anthropicCostPath, "anthropic-cost-path", opts.anthropicCostPath, "Anthropic costs endpoint path")
 	fs.StringVar(&opts.openAICostCSV, "openai-cost-csv", opts.openAICostCSV, "Optional OpenAI daily cost CSV override")
 	fs.StringVar(&opts.anthropicCostCSV, "anthropic-cost-csv", opts.anthropicCostCSV, "Optional Anthropic daily cost CSV override")
+	fs.StringVar(&opts.openRouterAdminKeyEnv, "openrouter-admin-key-env", opts.openRouterAdminKeyEnv, "Env var for OpenRouter admin API key")
+	fs.StringVar(&opts.openRouterBaseURL, "openrouter-base-url", opts.openRouterBaseURL, "OpenRouter API base URL")
+	fs.StringVar(&opts.openRouterUsagePath, "openrouter-usage-path", opts.openRouterUsagePath, "OpenRouter usage endpoint path")
 	fs.IntVar(&opts.limit, "limit", opts.limit, "Per-page bucket limit")
 	fs.BoolVar(&opts.showVersion, "version", false, "Print version and exit")
 	fs.BoolVar(&opts.showHelp, "help", false, "Show help")
@@ -373,9 +407,9 @@ func parseOptions(args []string) (options, error) {
 
 	opts.provider = strings.ToLower(strings.TrimSpace(opts.provider))
 	switch opts.provider {
-	case "all", "openai", "anthropic":
+	case "all", "openai", "anthropic", "openrouter":
 	default:
-		return opts, fmt.Errorf("invalid --provider=%q (expected all|openai|anthropic)", opts.provider)
+		return opts, fmt.Errorf("invalid --provider=%q (expected all|openai|anthropic|openrouter)", opts.provider)
 	}
 	opts.colorMode = strings.ToLower(strings.TrimSpace(opts.colorMode))
 	switch opts.colorMode {
@@ -414,9 +448,12 @@ func defaultOptions() options {
 		anthropicBaseURL:     "https://api.anthropic.com",
 		openAIUsagePath:      "/v1/organization/usage/completions",
 		anthropicUsagePath:   "/v1/organizations/usage_report/messages",
-		openAICostPath:       "/v1/organization/costs",
-		anthropicCostPath:    "/v1/organizations/cost_report",
-		limit:                31,
+		openAICostPath:         "/v1/organization/costs",
+		anthropicCostPath:      "/v1/organizations/cost_report",
+		openRouterAdminKeyEnv:  "OPENROUTER_ADMIN_KEY",
+		openRouterBaseURL:      "https://openrouter.ai",
+		openRouterUsagePath:    "/api/v1/activity",
+		limit:                  31,
 	}
 }
 
@@ -761,13 +798,13 @@ func printUsage(out *os.File, colorMode string) {
 	fmt.Fprintf(out, "       %s subs [flags]       Subscription quota only\n", exe)
 	fmt.Fprintf(out, "       %s prices [--check]   Show built-in pricing table\n", exe)
 	fmt.Fprintln(out)
-	fmt.Fprintln(out, "API key usage and subscription quota for OpenAI and Anthropic.")
+	fmt.Fprintln(out, "API key usage and subscription quota for OpenAI, Anthropic, and OpenRouter.")
 	fmt.Fprintln(out)
 
 	fmt.Fprintln(out, st.Header("Flags (api)"))
 	fmt.Fprintln(out, "  -h, --help                 Show help.")
 	fmt.Fprintln(out, "      --version              Print version and exit.")
-	fmt.Fprintln(out, "      --provider=all         all|openai|anthropic.")
+	fmt.Fprintln(out, "      --provider=all         all|openai|anthropic|openrouter.")
 	fmt.Fprintln(out, "      --group-by=key,date    key,date|model.")
 	fmt.Fprintln(out, "      --start=YYYY-MM-DD     Start date (default: 7 days ago).")
 	fmt.Fprintln(out, "      --end=YYYY-MM-DD       End date inclusive (default: today).")
@@ -793,8 +830,10 @@ func printUsage(out *os.File, colorMode string) {
 	fmt.Fprintln(out, "      --limit=31                    Per-page bucket limit.")
 	fmt.Fprintln(out, "      --openai-admin-key-env=OPENAI_ADMIN_KEY")
 	fmt.Fprintln(out, "      --anthropic-admin-key-env=ANTHROPIC_ADMIN_KEY")
+	fmt.Fprintln(out, "      --openrouter-admin-key-env=OPENROUTER_ADMIN_KEY")
 	fmt.Fprintln(out, "      --openai-base-url=https://api.openai.com")
 	fmt.Fprintln(out, "      --anthropic-base-url=https://api.anthropic.com")
+	fmt.Fprintln(out, "      --openrouter-base-url=https://openrouter.ai")
 	fmt.Fprintln(out, "      --openai-usage-path=/v1/organization/usage/completions")
 	fmt.Fprintln(out, "      --anthropic-usage-path=/v1/organizations/usage_report/messages")
 	fmt.Fprintln(out, "      --openai-cost-path=/v1/organization/costs")

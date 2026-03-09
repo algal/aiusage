@@ -1,6 +1,6 @@
 # aiusage
 
-CLI tool that reports AI API usage and costs for OpenAI and Anthropic. Two modes:
+CLI tool that reports AI API usage and costs for OpenAI, Anthropic, and OpenRouter. Two modes:
 
 - **API key usage** — token counts and dollar costs from provider admin APIs, broken out by provider, API key, date, and model
 - **Subscription quota** — live quota percentage and reset times for Claude Code and Codex subscriptions
@@ -12,6 +12,7 @@ CLI tool that reports AI API usage and costs for OpenAI and Anthropic. Two modes
 ```bash
 export OPENAI_ADMIN_KEY="..."
 export ANTHROPIC_ADMIN_KEY="..."
+export OPENROUTER_ADMIN_KEY="..."  # management key, not regular API key
 ```
 
 ### Subscription quota (requires CLI login)
@@ -62,6 +63,7 @@ go build ./cmd/aiusage
 
 ## Notes
 
+- OpenRouter returns actual USD costs directly; no pricing estimation needed. Data covers last 30 days only.
 - API endpoints are configurable via `--openai-usage-path`, `--anthropic-usage-path`, etc.
 - If pricing is missing for a model, cost is zero and a warning is shown.
 - Subscription quota is cached for 5 minutes to avoid rate limits. Use `--force` to bypass.
