@@ -861,7 +861,7 @@ func runSub(args []string) error {
 	var colorMode string
 	var timeout time.Duration
 	var force bool
-	fs.StringVar(&provider, "provider", "all", "Provider: all|openai|anthropic")
+	fs.StringVar(&provider, "provider", "all", "Provider: all|openai|anthropic|openrouter")
 	fs.BoolVar(&force, "force", false, "Bypass cache and fetch fresh data")
 	fs.BoolVar(&jsonOutput, "json", false, "Output JSON")
 	fs.StringVar(&colorMode, "color", "auto", "Color mode: auto|always|never")
@@ -872,9 +872,9 @@ func runSub(args []string) error {
 
 	provider = strings.ToLower(strings.TrimSpace(provider))
 	switch provider {
-	case "all", "openai", "anthropic":
+	case "all", "openai", "anthropic", "openrouter":
 	default:
-		return fmt.Errorf("invalid --provider=%q (expected all|openai|anthropic)", provider)
+		return fmt.Errorf("invalid --provider=%q (expected all|openai|anthropic|openrouter)", provider)
 	}
 
 	client := &http.Client{Timeout: timeout}
