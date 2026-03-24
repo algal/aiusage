@@ -92,7 +92,7 @@ func main() {
 
 func runAll() {
 	// Subscription usage (from CLI OAuth credentials)
-	subErr := runSub(nil)
+	subErr := runSub(os.Args[1:])
 
 	fmt.Println()
 
