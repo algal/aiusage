@@ -121,6 +121,99 @@ func refreshCodexToken(auth *codexAuthData) error {
 	return nil
 }
 
+// saveCodexCredentials persists the rotated tokens back to auth.json.
+// OpenAI rotates refresh tokens on every exchange, so failing to write the new
+// one back means the next refresh will be rejected with "already used".
+// Reads the existing file and merges in only the fields we own, so any other
+// keys the Codex CLI keeps there (e.g. OPENAI_API_KEY) survive the round-trip.
+func saveCodexCredentials(auth *codexAuthData) error {
+	dir := codexHome()
+	if dir == "" {
+		return fmt.Errorf("cannot determine codex home directory")
+	}
+	path := filepath.Join(dir, codexAuthFile)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("read %s: %w", path, err)
+	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return fmt.Errorf("parse %s: %w", path, err)
+	}
+	if raw == nil {
+		raw = map[string]json.RawMessage{}
+	}
+
+	tokens := map[string]json.RawMessage{}
+	if existing, ok := raw["tokens"]; ok {
+		_ = json.Unmarshal(existing, &tokens)
+	}
+	accessB, err := json.Marshal(auth.Tokens.AccessToken)
+	if err != nil {
+		return err
+	}
+	tokens["access_token"] = accessB
+	refreshB, err := json.Marshal(auth.Tokens.RefreshToken)
+	if err != nil {
+		return err
+	}
+	tokens["refresh_token"] = refreshB
+	if auth.Tokens.AccountID != "" {
+		accountB, err := json.Marshal(auth.Tokens.AccountID)
+		if err != nil {
+			return err
+		}
+		tokens["account_id"] = accountB
+	}
+	tokensB, err := json.Marshal(tokens)
+	if err != nil {
+		return err
+	}
+	raw["tokens"] = tokensB
+	lastB, err := json.Marshal(auth.LastRefresh)
+	if err != nil {
+		return err
+	}
+	raw["last_refresh"] = lastB
+
+	out, err := json.MarshalIndent(raw, "", "  ")
+	if err != nil {
+		return err
+	}
+	return atomicWrite(path, out, 0600)
+}
+
+// atomicWrite writes data to a temp file in the same directory and renames it
+// over path, so a crash mid-write can't leave a half-written credentials file.
+func atomicWrite(path string, data []byte, mode os.FileMode) error {
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, filepath.Base(path)+".tmp.*")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	cleanup := func() { _ = os.Remove(tmpPath) }
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		cleanup()
+		return err
+	}
+	if err := tmp.Chmod(mode); err != nil {
+		_ = tmp.Close()
+		cleanup()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		cleanup()
+		return err
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		cleanup()
+		return err
+	}
+	return nil
+}
+
 func FetchCodexStatus(client *http.Client, force bool) (*Status, error) {
 	if !force {
 		if cached, ok := loadCache("openai"); ok {
@@ -136,6 +229,9 @@ func FetchCodexStatus(client *http.Client, force bool) (*Status, error) {
 	if codexTokenNeedsRefresh(auth) {
 		if refreshErr := refreshCodexToken(auth); refreshErr != nil {
 			return nil, fmt.Errorf("token needs refresh: %w", refreshErr)
+		}
+		if saveErr := saveCodexCredentials(auth); saveErr != nil {
+			fmt.Fprintf(os.Stderr, "aiusage: warning: failed to persist refreshed codex credentials: %v\n", saveErr)
 		}
 	}
 
@@ -198,6 +294,9 @@ func doCodexUsageRequest(client *http.Client, auth *codexAuthData) ([]byte, erro
 	// If unauthorized, try refresh once
 	if resp.StatusCode == 401 && auth.Tokens.RefreshToken != "" {
 		if refreshErr := refreshCodexToken(auth); refreshErr == nil {
+			if saveErr := saveCodexCredentials(auth); saveErr != nil {
+				fmt.Fprintf(os.Stderr, "aiusage: warning: failed to persist refreshed codex credentials: %v\n", saveErr)
+			}
 			return doCodexUsageRequestRetry(client, auth)
 		}
 	}

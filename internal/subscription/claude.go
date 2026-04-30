@@ -27,6 +27,24 @@ type claudeCredentials struct {
 	AccessToken  string `json:"accessToken"`
 	RefreshToken string `json:"refreshToken"`
 	ExpiresAt    int64  `json:"expiresAt"` // milliseconds since epoch
+
+	// Where this credential was loaded from, so refreshed tokens can be written
+	// back to the same place. Anthropic rotates refresh tokens on every
+	// exchange, so failing to persist the new one will reject the next refresh.
+	source claudeCredSource
+}
+
+type claudeCredSourceKind int
+
+const (
+	claudeCredSourceUnknown claudeCredSourceKind = iota
+	claudeCredSourceFile
+	claudeCredSourceKeychain
+)
+
+type claudeCredSource struct {
+	kind claudeCredSourceKind
+	path string // file path when kind == claudeCredSourceFile
 }
 
 type claudeCredWrapper struct {
@@ -51,7 +69,12 @@ func loadClaudeCredentials() (*claudeCredentials, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read %s: %w", path, err)
 	}
-	return parseClaudeCredentials(data, path)
+	cred, err := parseClaudeCredentials(data, path)
+	if err != nil {
+		return nil, err
+	}
+	cred.source = claudeCredSource{kind: claudeCredSourceFile, path: path}
+	return cred, nil
 }
 
 func parseClaudeCredentials(data []byte, source string) (*claudeCredentials, error) {
@@ -71,7 +94,12 @@ func loadClaudeCredentialsFromKeychain() (*claudeCredentials, error) {
 	if err != nil {
 		return nil, fmt.Errorf("keychain lookup failed: %w", err)
 	}
-	return parseClaudeCredentials(bytes.TrimSpace(out), "keychain")
+	cred, err := parseClaudeCredentials(bytes.TrimSpace(out), "keychain")
+	if err != nil {
+		return nil, err
+	}
+	cred.source = claudeCredSource{kind: claudeCredSourceKeychain}
+	return cred, nil
 }
 
 func refreshClaudeToken(cred *claudeCredentials) error {
@@ -117,6 +145,120 @@ func refreshClaudeToken(cred *claudeCredentials) error {
 	return nil
 }
 
+// saveClaudeCredentials writes the rotated tokens back to whichever store the
+// credential was loaded from. Anthropic rotates refresh tokens on every
+// exchange, so without this the next refresh sees a "already used" rejection.
+func saveClaudeCredentials(cred *claudeCredentials) error {
+	switch cred.source.kind {
+	case claudeCredSourceFile:
+		return saveClaudeCredentialsToFile(cred, cred.source.path)
+	case claudeCredSourceKeychain:
+		return saveClaudeCredentialsToKeychain(cred)
+	default:
+		return fmt.Errorf("unknown credential source")
+	}
+}
+
+func saveClaudeCredentialsToFile(cred *claudeCredentials, path string) error {
+	// Read-modify-write so any unrelated top-level keys in the credentials file
+	// (Claude Code may add fields we don't know about) survive the round-trip.
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("read %s: %w", path, err)
+	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return fmt.Errorf("parse %s: %w", path, err)
+	}
+	if raw == nil {
+		raw = map[string]json.RawMessage{}
+	}
+
+	inner := map[string]json.RawMessage{}
+	if existing, ok := raw["claudeAiOauth"]; ok {
+		_ = json.Unmarshal(existing, &inner)
+	}
+	accessB, err := json.Marshal(cred.AccessToken)
+	if err != nil {
+		return err
+	}
+	inner["accessToken"] = accessB
+	refreshB, err := json.Marshal(cred.RefreshToken)
+	if err != nil {
+		return err
+	}
+	inner["refreshToken"] = refreshB
+	expB, err := json.Marshal(cred.ExpiresAt)
+	if err != nil {
+		return err
+	}
+	inner["expiresAt"] = expB
+	innerB, err := json.Marshal(inner)
+	if err != nil {
+		return err
+	}
+	raw["claudeAiOauth"] = innerB
+
+	out, err := json.MarshalIndent(raw, "", "  ")
+	if err != nil {
+		return err
+	}
+	return atomicWrite(path, out, 0600)
+}
+
+func saveClaudeCredentialsToKeychain(cred *claudeCredentials) error {
+	wrapper := claudeCredWrapper{ClaudeAiOauth: claudeCredentials{
+		AccessToken:  cred.AccessToken,
+		RefreshToken: cred.RefreshToken,
+		ExpiresAt:    cred.ExpiresAt,
+	}}
+	data, err := json.Marshal(wrapper)
+	if err != nil {
+		return err
+	}
+	// Preserve the existing entry's account name so we update in place rather
+	// than creating a new keychain item with different metadata.
+	account := lookupClaudeKeychainAccount()
+	args := []string{
+		"add-generic-password",
+		"-U",
+		"-s", "Claude Code-credentials",
+		"-w", string(data),
+	}
+	if account != "" {
+		args = append(args, "-a", account)
+	}
+	cmd := exec.Command("security", args...)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("security add-generic-password: %w: %s", err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+func lookupClaudeKeychainAccount() string {
+	out, err := exec.Command("security", "find-generic-password",
+		"-s", "Claude Code-credentials").CombinedOutput()
+	if err != nil {
+		return ""
+	}
+	// Lines look like:    "acct"<blob>="someone@example.com"
+	for _, line := range strings.Split(string(out), "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, `"acct"<blob>=`) {
+			continue
+		}
+		idx := strings.Index(line, "=")
+		if idx < 0 {
+			continue
+		}
+		val := strings.TrimSpace(line[idx+1:])
+		if strings.HasPrefix(val, `"`) && strings.HasSuffix(val, `"`) && len(val) >= 2 {
+			return val[1 : len(val)-1]
+		}
+	}
+	return ""
+}
+
 func FetchClaudeStatus(client *http.Client, force bool) (*Status, error) {
 	if !force {
 		if cached, ok := loadCache("anthropic"); ok {
@@ -133,6 +275,9 @@ func FetchClaudeStatus(client *http.Client, force bool) (*Status, error) {
 	if cred.ExpiresAt > 0 && time.Now().UnixMilli() >= cred.ExpiresAt {
 		if refreshErr := refreshClaudeToken(cred); refreshErr != nil {
 			return nil, fmt.Errorf("claude token expired; run 'claude' to refresh, then retry")
+		}
+		if saveErr := saveClaudeCredentials(cred); saveErr != nil {
+			fmt.Fprintf(os.Stderr, "aiusage: warning: failed to persist refreshed claude credentials: %v\n", saveErr)
 		}
 	}
 
@@ -154,6 +299,9 @@ func FetchClaudeStatus(client *http.Client, force bool) (*Status, error) {
 	// If unauthorized, try direct refresh once
 	if resp.StatusCode == 401 && cred.RefreshToken != "" {
 		if refreshErr := refreshClaudeToken(cred); refreshErr == nil {
+			if saveErr := saveClaudeCredentials(cred); saveErr != nil {
+				fmt.Fprintf(os.Stderr, "aiusage: warning: failed to persist refreshed claude credentials: %v\n", saveErr)
+			}
 			s, err := fetchClaudeUsage(client, cred)
 			if err == nil {
 				saveCache("anthropic", s)
